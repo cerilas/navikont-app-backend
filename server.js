@@ -737,6 +737,99 @@ app.get('/api/patient/dashboard/calendar', authenticate, async (req, res) => {
     client.release();
   }
 });
+
+// GET /api/patient/calendar/:date/tasks
+app.get('/api/patient/calendar/:date/tasks', authenticate, async (req, res) => {
+  const { date } = req.params; // YYYY-MM-DD
+  const client = await pool.connect();
+  try {
+    const enrollment = await getLatestEnrollment(client, req.user.userId);
+    if (!enrollment) {
+      return res.status(404).json({ error: 'No active enrollment found' });
+    }
+
+    const startDateStr = enrollment.activated_at || enrollment.created_at;
+    const startDate = new Date(startDateStr);
+    startDate.setHours(0, 0, 0, 0);
+
+    const targetDate = new Date(date);
+    targetDate.setHours(0, 0, 0, 0);
+
+    const diffTime = targetDate.getTime() - startDate.getTime();
+    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    const targetDayNumber = diffDays + 1;
+
+    // Fetch scheduled tasks for targetDayNumber
+    const scheduledQuery = `
+      SELECT 
+        cjs.id as step_id,
+        cjs.day_number,
+        cjs.is_required,
+        cm.title,
+        cmv.module_type,
+        pmp.completed_at
+      FROM content_journey_steps cjs
+      JOIN content_modules cm ON cm.id = cjs.module_id
+      JOIN content_module_versions cmv ON cmv.module_id = cm.id AND cmv.is_published = true
+      LEFT JOIN patient_module_progress pmp 
+        ON pmp.module_version_id = cmv.id 
+        AND pmp.enrollment_id = $1
+      WHERE cjs.journey_id = $2 AND cjs.day_number = $3
+      ORDER BY cjs.order_in_day ASC
+    `;
+    const scheduledRes = await client.query(scheduledQuery, [enrollment.id, enrollment.journey_id, targetDayNumber]);
+    
+    // Fetch extra tasks completed on this date
+    const extraQuery = `
+      SELECT 
+        cjs.id as step_id,
+        cjs.day_number,
+        cjs.is_required,
+        cm.title,
+        cmv.module_type,
+        pmp.completed_at
+      FROM patient_module_progress pmp
+      JOIN content_module_versions cmv ON cmv.id = pmp.module_version_id
+      JOIN content_modules cm ON cm.id = cmv.module_id
+      JOIN content_journey_steps cjs ON cjs.module_id = cm.id AND cjs.journey_id = $1
+      WHERE pmp.enrollment_id = $2
+        AND pmp.completed_at IS NOT NULL
+        AND DATE(pmp.completed_at AT TIME ZONE 'UTC') = $3::date
+        AND cjs.day_number != $4
+      ORDER BY pmp.completed_at ASC
+    `;
+    const extraRes = await client.query(extraQuery, [enrollment.journey_id, enrollment.id, date, targetDayNumber]);
+
+    res.json({
+      date,
+      targetDayNumber,
+      scheduledTasks: scheduledRes.rows.map(row => ({
+        id: row.step_id,
+        title: row.title,
+        type: row.module_type,
+        isRequired: row.is_required,
+        isCompleted: !!row.completed_at,
+        completedAt: row.completed_at,
+        originalDayNumber: row.day_number
+      })),
+      extraCompletedTasks: extraRes.rows.map(row => ({
+        id: row.step_id,
+        title: row.title,
+        type: row.module_type,
+        isRequired: row.is_required,
+        isCompleted: true,
+        completedAt: row.completed_at,
+        originalDayNumber: row.day_number
+      }))
+    });
+  } catch (err) {
+    console.error('Calendar Tasks error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
 // ─── DEVICES ─────────────────────────────────────────────────────────────────
 app.post('/api/patient/device-token', authenticate, async (req, res) => {
   const { deviceToken, platform = 'ios', appVersion } = req.body;
