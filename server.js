@@ -773,6 +773,7 @@ app.get('/api/patient/calendar/:date/tasks', authenticate, async (req, res) => {
       JOIN content_module_types cmt ON cmt.id = cm.module_type_id
       LEFT JOIN patient_module_progress pmp 
         ON pmp.enrollment_id = $1
+        AND pmp.day_number = cjs.day_number
         AND pmp.module_version_id IN (
           SELECT id FROM content_module_versions WHERE module_id = cm.id
         )
@@ -794,11 +795,11 @@ app.get('/api/patient/calendar/:date/tasks', authenticate, async (req, res) => {
       JOIN content_module_versions cmv ON cmv.id = pmp.module_version_id
       JOIN content_modules cm ON cm.id = cmv.module_id
       JOIN content_module_types cmt ON cmt.id = cm.module_type_id
-      JOIN content_journey_steps cjs ON cjs.module_id = cm.id AND cjs.journey_id = $1
+      JOIN content_journey_steps cjs ON cjs.module_id = cm.id AND cjs.journey_id = $1 AND cjs.day_number = pmp.day_number
       WHERE pmp.enrollment_id = $2
         AND pmp.completed_at IS NOT NULL
         AND DATE(pmp.completed_at AT TIME ZONE 'UTC') = $3::date
-        AND cjs.day_number != $4
+        AND pmp.day_number != $4
       ORDER BY pmp.completed_at ASC
     `;
     const extraRes = await client.query(extraQuery, [enrollment.journey_id, enrollment.id, date, targetDayNumber]);
