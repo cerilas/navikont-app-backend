@@ -765,15 +765,17 @@ app.get('/api/patient/calendar/:date/tasks', authenticate, async (req, res) => {
         cjs.id as step_id,
         cjs.day_number,
         cjs.is_required,
-        cm.title,
-        cmv.module_type,
+        cm.name as title,
+        cmt.code as module_type,
         pmp.completed_at
       FROM content_journey_steps cjs
       JOIN content_modules cm ON cm.id = cjs.module_id
-      JOIN content_module_versions cmv ON cmv.module_id = cm.id AND cmv.is_published = true
+      JOIN content_module_types cmt ON cmt.id = cm.module_type_id
       LEFT JOIN patient_module_progress pmp 
-        ON pmp.module_version_id = cmv.id 
-        AND pmp.enrollment_id = $1
+        ON pmp.enrollment_id = $1
+        AND pmp.module_version_id IN (
+          SELECT id FROM content_module_versions WHERE module_id = cm.id
+        )
       WHERE cjs.journey_id = $2 AND cjs.day_number = $3
       ORDER BY cjs.order_in_day ASC
     `;
@@ -785,12 +787,13 @@ app.get('/api/patient/calendar/:date/tasks', authenticate, async (req, res) => {
         cjs.id as step_id,
         cjs.day_number,
         cjs.is_required,
-        cm.title,
-        cmv.module_type,
+        cm.name as title,
+        cmt.code as module_type,
         pmp.completed_at
       FROM patient_module_progress pmp
       JOIN content_module_versions cmv ON cmv.id = pmp.module_version_id
       JOIN content_modules cm ON cm.id = cmv.module_id
+      JOIN content_module_types cmt ON cmt.id = cm.module_type_id
       JOIN content_journey_steps cjs ON cjs.module_id = cm.id AND cjs.journey_id = $1
       WHERE pmp.enrollment_id = $2
         AND pmp.completed_at IS NOT NULL
