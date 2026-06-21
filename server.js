@@ -889,9 +889,75 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
     }
 
     // Today's tasks
-    const tasks = await getTodayTasks(client, req.user.userId, enrollment);
-    const totalTasks = tasks.length;
-    const completedTasks = tasks.filter((t) => t.completionStatus === 'completed').length;
+    let tasks = [];
+    let totalTasks = 0;
+    let completedTasks = 0;
+
+    if (!enrollment.journey_id) {
+      // Automatic conditional assignment expected, check for onboarding_trigger rule
+      const ruleRes = await client.query(`
+        SELECT actions->>'questionnaireId' as q_id 
+        FROM core_rules 
+        WHERE target_type = 'app' AND target_id = $1 AND rule_type = 'onboarding_trigger' AND is_active = true
+        ORDER BY priority DESC LIMIT 1
+      `, [APP_ID]);
+
+      if (ruleRes.rows.length > 0 && ruleRes.rows[0].q_id) {
+        const qId = ruleRes.rows[0].q_id;
+        
+        // Fetch questionnaire details
+        const qvResult = await client.query(
+          `SELECT fqv.id, fq.name, fqv.title, fqv.description_html
+           FROM forms_questionnaire_versions fqv
+           JOIN forms_questionnaires fq ON fq.id = fqv.questionnaire_id
+           WHERE (fqv.questionnaire_id = $1 OR fqv.id = $1)
+             AND fqv.status = 'published'
+           ORDER BY fqv.version_number DESC LIMIT 1`,
+          [qId]
+        );
+
+        if (qvResult.rows.length > 0) {
+          const qv = qvResult.rows[0];
+          // Check if user already submitted it
+          const submittedRes = await client.query(
+            `SELECT id FROM patient_questionnaire_responses
+             WHERE enrollment_id = $1 AND patient_user_id = $2 AND questionnaire_version_id = $3`,
+            [enrollment.id, req.user.userId, qv.id]
+          );
+
+          if (submittedRes.rows.length === 0) {
+             // Not submitted yet, inject as pseudo-task
+             tasks = [{
+                stepId: "onboarding-step",
+                dayNumber: 1,
+                orderInDay: 1,
+                isRequired: true,
+                delayMinutes: 0,
+                timeWindowStart: null,
+                timeWindowEnd: null,
+                moduleId: qId, 
+                moduleVersionId: qv.id,
+                moduleName: qv.name || "Başlangıç Anketi",
+                moduleType: "questionnaire",
+                moduleTypeName: "Anket Modülü",
+                moduleTitle: qv.title || "Değerlendirme Anketi",
+                moduleSubtitle: "Tedavi planınızı belirlemek için lütfen bu anketi doldurun.",
+                moduleContent: {
+                  questionnaireId: qId
+                },
+                moduleSettings: null,
+                completionStatus: "not_started",
+                progress: null
+             }];
+             totalTasks = 1;
+          }
+        }
+      }
+    } else {
+      tasks = await getTodayTasks(client, req.user.userId, enrollment);
+      totalTasks = tasks.length;
+      completedTasks = tasks.filter((t) => t.completionStatus === 'completed').length;
+    }
 
     // Streak info
     const streakResult = await client.query(
@@ -1554,6 +1620,49 @@ app.post('/api/patient/questionnaires/:questionnaireVersionId/submit', authentic
           JSON.stringify({ totalScore, riskLevel, questionnaireVersionId }),
         ]
       );
+    }
+    }
+
+    // Check if we need to auto-assign a journey based on this questionnaire score
+    if (!enrollment.journey_id) {
+      // Find journey_assignment rules for this app
+      const ruleRes = await client.query(`
+        SELECT condition, actions 
+        FROM core_rules 
+        WHERE target_type = 'app' AND target_id = $1 AND rule_type = 'journey_assignment' AND is_active = true
+        ORDER BY priority DESC
+      `, [APP_ID]);
+
+      let assignedJourneyId = null;
+      for (const rule of ruleRes.rows) {
+        const cond = rule.condition || {};
+        if (cond.questionnaireId && cond.questionnaireId !== resolvedVersionId && cond.questionnaireId !== questionnaireVersionId) {
+          // If rule is specific to a questionnaire and it doesn't match, skip
+          // Note: The rule usually specifies the base questionnaire ID, not the version ID.
+          // Let's get the base questionnaire ID from our resolved version
+          const baseQRes = await client.query(`SELECT questionnaire_id FROM forms_questionnaire_versions WHERE id = $1`, [resolvedVersionId]);
+          if (baseQRes.rows.length > 0 && cond.questionnaireId !== baseQRes.rows[0].questionnaire_id) {
+            continue;
+          }
+        }
+        
+        const scoreMin = cond.scoreMin !== undefined ? cond.scoreMin : -Infinity;
+        const scoreMax = cond.scoreMax !== undefined ? cond.scoreMax : Infinity;
+        
+        if (totalScore >= scoreMin && totalScore <= scoreMax) {
+          assignedJourneyId = rule.actions?.journeyId;
+          break;
+        }
+      }
+
+      if (assignedJourneyId) {
+        // Assign the journey
+        await client.query(`
+          UPDATE patient_app_enrollments
+          SET journey_id = $1, updated_at = NOW()
+          WHERE id = $2
+        `, [assignedJourneyId, enrollment.id]);
+      }
     }
 
     await client.query('COMMIT');
