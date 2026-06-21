@@ -918,15 +918,7 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
 
         if (qvResult.rows.length > 0) {
           const qv = qvResult.rows[0];
-          // Check if user already submitted it
-          const submittedRes = await client.query(
-            `SELECT id FROM patient_questionnaire_responses
-             WHERE enrollment_id = $1 AND patient_user_id = $2 AND questionnaire_version_id = $3`,
-            [enrollment.id, req.user.userId, qv.id]
-          );
-
-          if (submittedRes.rows.length === 0) {
-             // Not submitted yet, inject as pseudo-task
+             // Inject as pseudo-task
              const crypto = require('crypto');
              tasks = [{
                 stepId: crypto.randomUUID(),
@@ -951,7 +943,6 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
                 progress: null
              }];
              totalTasks = 1;
-          }
         }
       }
     } else {
