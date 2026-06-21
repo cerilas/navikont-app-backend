@@ -1017,7 +1017,7 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
       enrollment: {
         id: enrollment.id,
         status: enrollment.status,
-        currentDay: enrollment.journey_id ? enrollment.current_day : null,
+        currentDay: enrollment.journey_id ? enrollment.current_day : 0,
         progressPercent: enrollment.journey_id ? enrollment.progress_percent : 0,
         startDate: enrollment.start_date,
         endDate: enrollment.end_date,
