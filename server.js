@@ -626,7 +626,7 @@ app.get('/api/patient/dashboard/calendar', authenticate, async (req, res) => {
     const totalDays = journeyResult.rows[0]?.max_day || 0;
 
     if (totalDays === 0) {
-      return res.json({ enrollmentDate: startDate, currentDay, totalDays: 0, days: [] });
+      return res.json({ enrollmentDate: startDate, currentDay: null, totalDays: 0, days: [] });
     }
 
     // 2. Fetch completions
@@ -1017,22 +1017,22 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
       enrollment: {
         id: enrollment.id,
         status: enrollment.status,
-        currentDay: enrollment.current_day,
-        progressPercent: enrollment.progress_percent,
+        currentDay: enrollment.journey_id ? enrollment.current_day : null,
+        progressPercent: enrollment.journey_id ? enrollment.progress_percent : 0,
         startDate: enrollment.start_date,
         endDate: enrollment.end_date,
         activatedAt: enrollment.activated_at,
       },
       today: {
-        currentDay: enrollment.current_day || 1,
+        currentDay: enrollment.journey_id ? (enrollment.current_day || 1) : null,
         totalTasks,
         completedTasks,
         tasks,
       },
       progress: {
-        totalSteps,
-        completedModules,
-        progressPercent: Math.round((completedModules / totalSteps) * 100),
+        totalSteps: enrollment.journey_id ? totalSteps : 1,
+        completedModules: enrollment.journey_id ? completedModules : 0,
+        progressPercent: enrollment.journey_id ? Math.round((completedModules / totalSteps) * 100) : 0,
       },
       streak: streakData,
       notifications: notifResult.rows,
