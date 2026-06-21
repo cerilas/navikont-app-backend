@@ -918,8 +918,17 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
 
         if (qvResult.rows.length > 0) {
           const qv = qvResult.rows[0];
-             // Inject as pseudo-task
-             const crypto = require('crypto');
+          // Check if user already submitted it
+          const submittedRes = await client.query(
+            `SELECT id FROM patient_questionnaire_responses
+             WHERE enrollment_id = $1 AND patient_user_id = $2 AND questionnaire_version_id = $3`,
+            [enrollment.id, req.user.userId, qv.id]
+          );
+
+          const crypto = require('crypto');
+          
+          if (submittedRes.rows.length === 0) {
+             // Inject Questionnaire
              tasks = [{
                 stepId: crypto.randomUUID(),
                 dayNumber: 1,
@@ -942,7 +951,32 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
                 completionStatus: "not_started",
                 progress: null
              }];
-             totalTasks = 1;
+          } else {
+             // Inject 'Pending Review' Article
+             tasks = [{
+                stepId: crypto.randomUUID(),
+                dayNumber: 1,
+                orderInDay: 1,
+                isRequired: true,
+                delayMinutes: 0,
+                timeWindowStart: null,
+                timeWindowEnd: null,
+                moduleId: crypto.randomUUID(), 
+                moduleVersionId: crypto.randomUUID(),
+                moduleName: "İnceleme Bekleniyor",
+                moduleType: "article",
+                moduleTypeName: "Bilgilendirme",
+                moduleTitle: "Değerlendirmeniz Alındı",
+                moduleSubtitle: "Doktorunuz sizin için en uygun programı belirleyecektir.",
+                moduleContent: {
+                  html: "<div style=\"padding: 20px; font-family: -apple-system, sans-serif; text-align: center;\"><svg width=\"64\" height=\"64\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#06B6D4\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" style=\"margin-bottom: 20px;\"><path d=\"M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z\"></path><path d=\"M12 8v4\"></path><path d=\"M12 16h.01\"></path></svg><h2 style=\"color: #1c1c1e; margin-bottom: 12px;\">Teşekkür Ederiz!</h2><p style=\"color: #64748b; font-size: 16px; line-height: 1.5;\">Anket sonuçlarınız sistemimize başarıyla kaydedildi ve değerlendirilmek üzere doktorunuza iletildi.</p><p style=\"color: #64748b; font-size: 16px; line-height: 1.5; margin-top: 12px;\">Sizin için en uygun tedavi programı belirlendiğinde uygulama üzerinden bildirim alacaksınız.</p></div>"
+                },
+                moduleSettings: null,
+                completionStatus: "completed",
+                progress: null
+             }];
+          }
+          totalTasks = 1;
         }
       }
     } else {
