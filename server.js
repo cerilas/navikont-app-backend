@@ -927,8 +927,9 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
 
           if (submittedRes.rows.length === 0) {
              // Not submitted yet, inject as pseudo-task
+             const crypto = require('crypto');
              tasks = [{
-                stepId: "onboarding-step",
+                stepId: crypto.randomUUID(),
                 dayNumber: 1,
                 orderInDay: 1,
                 isRequired: true,
