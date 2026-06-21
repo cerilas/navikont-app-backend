@@ -1659,7 +1659,9 @@ app.post('/api/patient/questionnaires/:questionnaireVersionId/submit', authentic
         // Assign the journey
         await client.query(`
           UPDATE patient_app_enrollments
-          SET journey_id = $1, updated_at = NOW()
+          SET journey_id = $1, 
+              updated_at = NOW(),
+              metadata = COALESCE(metadata, '{}'::jsonb) || '{"auto_assigned": true}'::jsonb
           WHERE id = $2
         `, [assignedJourneyId, enrollment.id]);
       }
