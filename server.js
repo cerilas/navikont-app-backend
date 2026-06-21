@@ -1621,7 +1621,6 @@ app.post('/api/patient/questionnaires/:questionnaireVersionId/submit', authentic
         ]
       );
     }
-    }
 
     // Check if we need to auto-assign a journey based on this questionnaire score
     if (!enrollment.journey_id) {
