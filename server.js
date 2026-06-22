@@ -132,11 +132,19 @@ app.post('/api/auth/login', async (req, res) => {
       { expiresIn: '30d' }
     );
 
-    // Get patient profile if exists
     const profileResult = await client.query(
       `SELECT * FROM patient_profiles WHERE user_id = $1`,
       [user.id]
     );
+
+    const diseasesResult = await client.query(
+      `SELECT disease_id FROM patient_diseases WHERE patient_user_id = $1`,
+      [user.id]
+    );
+    let profileData = profileResult.rows[0] || null;
+    if (profileData) {
+      profileData.disease_ids = diseasesResult.rows.map(r => r.disease_id);
+    }
 
     // Get active enrollment
     const enrollment = await getLatestEnrollment(client, user.id);
@@ -152,7 +160,7 @@ app.post('/api/auth/login', async (req, res) => {
         status: user.status,
         profileImage: user.profile_image,
       },
-      profile: profileResult.rows[0] || null,
+      profile: profileData,
       enrollment: enrollment
         ? {
             id: enrollment.id,
@@ -237,6 +245,15 @@ app.get('/api/patient/me', authenticate, async (req, res) => {
       [req.user.userId]
     );
 
+    const diseasesResult = await client.query(
+      `SELECT disease_id FROM patient_diseases WHERE patient_user_id = $1`,
+      [req.user.userId]
+    );
+    let profileData = profileResult.rows[0] || null;
+    if (profileData) {
+      profileData.disease_ids = diseasesResult.rows.map(r => r.disease_id);
+    }
+
     res.json({
       user: {
         id: user.id,
@@ -248,10 +265,82 @@ app.get('/api/patient/me', authenticate, async (req, res) => {
         lastLoginAt: user.last_login_at,
         createdAt: user.created_at,
       },
-      profile: profileResult.rows[0] || null,
+      profile: profileData,
     });
   } catch (err) {
     console.error('Profile error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/patient/profile
+app.post('/api/patient/profile', authenticate, async (req, res) => {
+  const { birth_date, gender, height_cm, weight_kg, blood_type, disease_ids } = req.body;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query(
+      `SELECT id FROM patient_profiles WHERE user_id = $1`,
+      [req.user.userId]
+    );
+
+    if (existing.rows.length > 0) {
+      await client.query(
+        `UPDATE patient_profiles 
+         SET birth_date = $1, gender = $2, height_cm = $3, weight_kg = $4, blood_type = $5, updated_at = NOW()
+         WHERE user_id = $6`,
+        [birth_date, gender, height_cm, weight_kg, blood_type, req.user.userId]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO patient_profiles (id, user_id, birth_date, gender, height_cm, weight_kg, blood_type, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+        [req.user.userId, birth_date, gender, height_cm, weight_kg, blood_type]
+      );
+    }
+
+    if (Array.isArray(disease_ids)) {
+      await client.query(`DELETE FROM patient_diseases WHERE patient_user_id = $1`, [req.user.userId]);
+      for (const dId of disease_ids) {
+        await client.query(`INSERT INTO patient_diseases (patient_user_id, disease_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [req.user.userId, dId]);
+      }
+    }
+
+    await client.query('COMMIT');
+
+    const updated = await client.query(
+      `SELECT * FROM patient_profiles WHERE user_id = $1`,
+      [req.user.userId]
+    );
+    const diseasesRes = await client.query(
+      `SELECT disease_id FROM patient_diseases WHERE patient_user_id = $1`,
+      [req.user.userId]
+    );
+    let profileData = updated.rows[0];
+    if (profileData) {
+      profileData.disease_ids = diseasesRes.rows.map(r => r.disease_id);
+    }
+
+    res.json({ success: true, profile: profileData });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Update profile error:', err);
+    res.status(500).json({ error: 'Profil güncellenirken sunucu hatası oluştu' });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/diseases
+app.get('/api/diseases', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const result = await client.query(`SELECT id, name, risk_level, category_id FROM medical_diseases WHERE status = 'active' ORDER BY name ASC`);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Diseases error:', err);
     res.status(500).json({ error: 'Internal server error' });
   } finally {
     client.release();
