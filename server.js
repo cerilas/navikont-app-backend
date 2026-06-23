@@ -281,6 +281,22 @@ app.post('/api/patient/profile', authenticate, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const oldProfileRes = await client.query(
+      `SELECT birth_date, gender, height_cm, weight_kg, blood_type FROM patient_profiles WHERE user_id = $1`,
+      [req.user.userId]
+    );
+    const oldDiseasesRes = await client.query(
+      `SELECT disease_id FROM patient_diseases WHERE patient_user_id = $1`,
+      [req.user.userId]
+    );
+    
+    let oldData = {};
+    if (oldProfileRes.rows.length > 0) {
+      oldData = { ...oldProfileRes.rows[0] };
+      if (oldData.birth_date) oldData.birth_date = new Date(oldData.birth_date).toISOString().split('T')[0];
+    }
+    oldData.disease_ids = oldDiseasesRes.rows.map(r => r.disease_id).sort();
+
     const existing = await client.query(
       `SELECT id FROM patient_profiles WHERE user_id = $1`,
       [req.user.userId]
@@ -306,6 +322,23 @@ app.post('/api/patient/profile', authenticate, async (req, res) => {
       for (const dId of disease_ids) {
         await client.query(`INSERT INTO patient_diseases (patient_user_id, disease_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [req.user.userId, dId]);
       }
+    }
+
+    const newData = {
+      birth_date: birth_date || null,
+      gender: gender || null,
+      height_cm: height_cm || null,
+      weight_kg: weight_kg || null,
+      blood_type: blood_type || null,
+      disease_ids: Array.isArray(disease_ids) ? [...disease_ids].sort() : []
+    };
+    
+    if (JSON.stringify(oldData) !== JSON.stringify(newData)) {
+      await client.query(
+        `INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, old_data, new_data, created_at)
+         VALUES (gen_random_uuid(), $1, 'update_profile', 'patient', $2, $3, $4, NOW())`,
+        [req.user.userId, req.user.userId, JSON.stringify(oldData), JSON.stringify(newData)]
+      );
     }
 
     await client.query('COMMIT');
