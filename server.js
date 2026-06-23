@@ -51,6 +51,16 @@ function authenticate(req, res, next) {
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
+function formatProfileData(profile) {
+  if (!profile) return null;
+  if (profile.height_cm) profile.height_cm = parseFloat(profile.height_cm);
+  if (profile.weight_kg) profile.weight_kg = parseFloat(profile.weight_kg);
+  if (profile.birth_date) {
+    profile.birth_date = new Date(profile.birth_date).toISOString().split('T')[0];
+  }
+  return profile;
+}
+
 // Get the active enrollment for a patient user
 async function getActiveEnrollment(client, userId) {
   const result = await client.query(
