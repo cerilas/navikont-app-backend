@@ -142,6 +142,14 @@ app.post('/api/auth/login', async (req, res) => {
          WHERE patient_user_id = $1 AND status = 'invited'`,
         [user.id]
       );
+
+      // Also update last_active_at for all enrollments of this patient
+      await client.query(
+        `UPDATE patient_app_enrollments 
+         SET last_active_at = NOW() 
+         WHERE patient_user_id = $1`,
+        [user.id]
+      );
     }
 
     // Generate JWT
