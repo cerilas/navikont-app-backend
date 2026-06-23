@@ -5,3 +5,25 @@
 NaviKont API server running on port 3000
 Health check: http://localhost:3000/api/health
 App ID: 3ee42ade-0563-4eae-9c37-65b878667446
+Update profile error: error: insert or update on table "patient_profiles" violates foreign key constraint "patient_profiles_user_id_fkey"
+    at /Users/deniz/Documents/Navikont/backend/node_modules/pg/lib/client.js:646:17
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async /Users/deniz/Documents/Navikont/backend/server.js:297:7 {
+  length: 326,
+  severity: 'ERROR',
+  code: '23503',
+  detail: 'Key (user_id)=(243fc46e-00b8-4447-9755-e4657158bc25) is not present in table "core_users".',
+  hint: undefined,
+  position: undefined,
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: 'public',
+  table: 'patient_profiles',
+  column: undefined,
+  dataType: undefined,
+  constraint: 'patient_profiles_user_id_fkey',
+  file: 'ri_triggers.c',
+  line: '2772',
+  routine: 'ri_ReportViolation'
+}

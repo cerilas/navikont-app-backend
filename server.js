@@ -131,6 +131,19 @@ app.post('/api/auth/login', async (req, res) => {
       [user.id]
     );
 
+    // If patient, auto-activate any 'invited' enrollments (Program starts on first login)
+    if (user.user_type === 'patient') {
+      await client.query(
+        `UPDATE patient_app_enrollments 
+         SET status = 'active', 
+             start_date = CURRENT_DATE, 
+             activated_at = NOW(), 
+             updated_at = NOW() 
+         WHERE patient_user_id = $1 AND status = 'invited'`,
+        [user.id]
+      );
+    }
+
     // Generate JWT
     const token = jwt.sign(
       {
