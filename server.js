@@ -141,7 +141,7 @@ app.post('/api/auth/login', async (req, res) => {
       `SELECT disease_id FROM patient_diseases WHERE patient_user_id = $1`,
       [user.id]
     );
-    let profileData = profileResult.rows[0] || null;
+    let profileData = profileResult.rows[0] ? formatProfileData(profileResult.rows[0]) : null;
     if (profileData) {
       profileData.disease_ids = diseasesResult.rows.map(r => r.disease_id);
     }
@@ -249,7 +249,7 @@ app.get('/api/patient/me', authenticate, async (req, res) => {
       `SELECT disease_id FROM patient_diseases WHERE patient_user_id = $1`,
       [req.user.userId]
     );
-    let profileData = profileResult.rows[0] || null;
+    let profileData = profileResult.rows[0] ? formatProfileData(profileResult.rows[0]) : null;
     if (profileData) {
       profileData.disease_ids = diseasesResult.rows.map(r => r.disease_id);
     }
@@ -351,7 +351,7 @@ app.post('/api/patient/profile', authenticate, async (req, res) => {
       `SELECT disease_id FROM patient_diseases WHERE patient_user_id = $1`,
       [req.user.userId]
     );
-    let profileData = updated.rows[0];
+    let profileData = updated.rows[0] ? formatProfileData(updated.rows[0]) : null;
     if (profileData) {
       profileData.disease_ids = diseasesRes.rows.map(r => r.disease_id);
     }
