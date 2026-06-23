@@ -43,6 +43,15 @@ function authenticate(req, res, next) {
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
+
+    // Fire and forget update of last_active_at
+    if (req.user.userType === 'patient') {
+      pool.query(
+        `UPDATE patient_app_enrollments SET last_active_at = NOW() WHERE patient_user_id = $1`,
+        [req.user.userId]
+      ).catch(err => console.error('Error updating last_active_at:', err));
+    }
+
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
