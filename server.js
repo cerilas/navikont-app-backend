@@ -1189,6 +1189,17 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
       [req.user.userId, APP_ID]
     );
 
+    const unreadCountResult = await client.query(
+      `SELECT COUNT(*) as unread
+       FROM patient_notifications
+       WHERE user_id = $1
+         AND app_id = $2
+         AND status != 'cancelled'
+         AND read_at IS NULL`,
+      [req.user.userId, APP_ID]
+    );
+    const unreadNotificationCount = parseInt(unreadCountResult.rows[0].unread) || 0;
+
     let streakData = streakResult.rows[0] || {
       current_streak: 0,
       longest_streak: 0,
@@ -1223,6 +1234,7 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
       },
       streak: streakData,
       notifications: notifResult.rows,
+      unreadNotificationCount,
     });
   } catch (err) {
     console.error('Dashboard error:', err);
