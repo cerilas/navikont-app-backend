@@ -60,6 +60,47 @@ function authenticate(req, res, next) {
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
+// Parse the Accept-Language header to determine the requested language
+function getLanguage(req) {
+  const langHeader = req.headers['accept-language'];
+  if (!langHeader) return 'tr'; // fallback
+  // Example "en-US,en;q=0.9" -> "en"
+  const lang = langHeader.split(',')[0].split('-')[0].toLowerCase();
+  return lang;
+}
+
+// Fetch a single translated field if the language is not 'tr'
+async function getTranslation(client, entityType, entityId, fieldName, lang) {
+  if (lang === 'tr') return null;
+  const result = await client.query(
+    `SELECT translated_text FROM content_translations 
+     WHERE entity_type = $1 AND entity_id = $2 
+     AND field_name = $3 AND language = $4`,
+    [entityType, entityId, fieldName, lang]
+  );
+  return result.rows[0]?.translated_text || null;
+}
+
+// Fetch all translations for a set of entity IDs to avoid N+1 queries
+async function getTranslationsMap(client, entityType, entityIds, lang) {
+  if (lang === 'tr' || !entityIds || entityIds.length === 0) return {};
+  
+  const result = await client.query(
+    `SELECT entity_id, field_name, translated_text 
+     FROM content_translations 
+     WHERE entity_type = $1 AND entity_id = ANY($2) AND language = $3`,
+    [entityType, entityIds, lang]
+  );
+  
+  // Create a nested map: map[entityId][fieldName] = translatedText
+  const map = {};
+  for (const row of result.rows) {
+    if (!map[row.entity_id]) map[row.entity_id] = {};
+    map[row.entity_id][row.field_name] = row.translated_text;
+  }
+  return map;
+}
+
 function formatProfileData(profile) {
   if (!profile) return null;
   if (profile.height_cm) profile.height_cm = parseFloat(profile.height_cm);
@@ -411,6 +452,18 @@ app.get('/api/diseases', async (req, res) => {
   const client = await pool.connect();
   try {
     const result = await client.query(`SELECT id, name, risk_level, category_id FROM medical_diseases WHERE status = 'active' ORDER BY name ASC`);
+    
+    const lang = getLanguage(req);
+    if (lang !== 'tr' && result.rows.length > 0) {
+      const ids = result.rows.map(r => r.id);
+      const transMap = await getTranslationsMap(client, 'medical_diseases', ids, lang);
+      for (const row of result.rows) {
+        if (transMap[row.id] && transMap[row.id].name) {
+          row.name = transMap[row.id].name;
+        }
+      }
+    }
+    
     res.json(result.rows);
   } catch (err) {
     console.error('Diseases error:', err);
@@ -558,7 +611,7 @@ app.put('/api/patient/enrollment/current-day', authenticate, async (req, res) =>
 
 // ─── TODAY'S TASKS HELPER ────────────────────────────────────────────────────
 
-async function getTodayTasks(client, userId, enrollment) {
+async function getTodayTasks(client, userId, enrollment, lang = 'tr') {
   const currentDay = enrollment.current_day || 1;
 
   // Get journey steps for current day
@@ -598,6 +651,10 @@ async function getTodayTasks(client, userId, enrollment) {
      ORDER BY cjs.order_in_day ASC`,
     [enrollment.journey_id, currentDay]
   );
+
+  // Fetch translations for module versions
+  const moduleVersionIds = stepsResult.rows.map(r => r.module_version_id).filter(Boolean);
+  const translationsMap = await getTranslationsMap(client, 'content_module_versions', moduleVersionIds, lang);
 
   // Get completion status for each module version
   const tasks = [];
@@ -713,6 +770,35 @@ async function getTodayTasks(client, userId, enrollment) {
       step.module_content = moduleContentObj; // Reassign back
     }
 
+    // Apply translations
+    let translatedTitle = step.module_title;
+    let translatedSubtitle = step.module_subtitle;
+    let translatedContent = step.module_content;
+
+    if (step.module_version_id && translationsMap[step.module_version_id]) {
+      const trans = translationsMap[step.module_version_id];
+      if (trans.title) translatedTitle = trans.title;
+      if (trans.subtitle) translatedSubtitle = trans.subtitle;
+      
+      // Translate JSONB content fields based on module type
+      // Using a clone of content to not modify the original if needed
+      let contentObj = translatedContent || {};
+      if (typeof contentObj === 'string') {
+        try { contentObj = JSON.parse(contentObj); } catch(e) {}
+      }
+      
+      // Translate deep fields using lodash-like path mapping if needed, 
+      // but assuming translations are stored with 'content.html', 'content.description' etc.
+      // E.g., field_name = 'content.html'
+      for (const [key, value] of Object.entries(trans)) {
+        if (key.startsWith('content.')) {
+          const contentField = key.split('.')[1];
+          contentObj[contentField] = value;
+        }
+      }
+      translatedContent = contentObj;
+    }
+
     tasks.push({
       stepId: step.step_id,
       dayNumber: step.day_number,
@@ -726,9 +812,9 @@ async function getTodayTasks(client, userId, enrollment) {
       moduleName: step.module_name,
       moduleType: step.module_type,
       moduleTypeName: step.module_type_name,
-      moduleTitle: step.module_title,
-      moduleSubtitle: step.module_subtitle,
-      moduleContent: step.module_content,
+      moduleTitle: translatedTitle,
+      moduleSubtitle: translatedSubtitle,
+      moduleContent: translatedContent,
       moduleSettings: step.module_settings,
       completionStatus,
       progress: progressData,
@@ -747,7 +833,8 @@ app.get('/api/patient/today', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'No active enrollment found' });
     }
 
-    const tasks = await getTodayTasks(client, req.user.userId, enrollment);
+    const lang = getLanguage(req);
+    const tasks = await getTodayTasks(client, req.user.userId, enrollment, lang);
 
     const totalTasks = tasks.length;
     const completedTasks = tasks.filter((t) => t.completionStatus === 'completed').length;
@@ -1011,6 +1098,13 @@ app.post('/api/patient/device-token', authenticate, async (req, res) => {
        DO UPDATE SET updated_at = NOW(), platform = EXCLUDED.platform, app_version = EXCLUDED.app_version`,
       [req.user.userId, deviceToken, platform, appVersion || null]
     );
+
+    const lang = getLanguage(req);
+    await pool.query(
+      `UPDATE core_users SET preferred_language = $1 WHERE id = $2`,
+      [lang, req.user.userId]
+    );
+
     res.json({ success: true });
   } catch (err) {
     console.error('Error saving device token:', err);
@@ -1128,10 +1222,10 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
                 moduleName: "İnceleme Bekleniyor",
                 moduleType: "article",
                 moduleTypeName: "Bilgilendirme",
-                moduleTitle: "Değerlendirmeniz Alındı",
-                moduleSubtitle: "Doktorunuz sizin için en uygun programı belirleyecektir.",
+                moduleTitle: lang === 'en' ? "Review Pending" : (lang === 'de' ? "Überprüfung ausstehend" : "Değerlendirmeniz Alındı"),
+                moduleSubtitle: lang === 'en' ? "Your doctor will determine the most suitable program." : (lang === 'de' ? "Ihr Arzt wird das am besten geeignete Programm bestimmen." : "Doktorunuz sizin için en uygun programı belirleyecektir."),
                 moduleContent: {
-                  html: "<div style=\"padding: 20px; font-family: -apple-system, sans-serif; text-align: center;\"><svg width=\"64\" height=\"64\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#06B6D4\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" style=\"margin-bottom: 20px;\"><path d=\"M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z\"></path><path d=\"M12 8v4\"></path><path d=\"M12 16h.01\"></path></svg><h2 style=\"color: #1c1c1e; margin-bottom: 12px;\">Teşekkür Ederiz!</h2><p style=\"color: #64748b; font-size: 16px; line-height: 1.5;\">Anket sonuçlarınız sistemimize başarıyla kaydedildi ve değerlendirilmek üzere doktorunuza iletildi.</p><p style=\"color: #64748b; font-size: 16px; line-height: 1.5; margin-top: 12px;\">Sizin için en uygun tedavi programı belirlendiğinde uygulama üzerinden bildirim alacaksınız.</p></div>"
+                  html: `<div style="padding: 20px; font-family: -apple-system, sans-serif; text-align: center;"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#06B6D4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 20px;"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"></path><path d="M12 8v4"></path><path d="M12 16h.01"></path></svg><h2 style="color: #1c1c1e; margin-bottom: 12px;">${lang === 'en' ? 'Thank You!' : (lang === 'de' ? 'Vielen Dank!' : 'Teşekkür Ederiz!')}</h2><p style="color: #64748b; font-size: 16px; line-height: 1.5;">${lang === 'en' ? 'Your responses have been saved and sent to your doctor for review.' : (lang === 'de' ? 'Ihre Antworten wurden gespeichert und zur Überprüfung an Ihren Arzt gesendet.' : 'Anket sonuçlarınız sistemimize başarıyla kaydedildi ve değerlendirilmek üzere doktorunuza iletildi.')}</p><p style="color: #64748b; font-size: 16px; line-height: 1.5; margin-top: 12px;">${lang === 'en' ? 'You will be notified once a suitable program is assigned.' : (lang === 'de' ? 'Sie werden benachrichtigt, sobald ein geeignetes Programm zugewiesen wurde.' : 'Sizin için en uygun tedavi programı belirlendiğinde uygulama üzerinden bildirim alacaksınız.')}</p></div>`
                 },
                 moduleSettings: null,
                 completionStatus: "completed",
@@ -1142,7 +1236,8 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
         }
       }
     } else {
-      tasks = await getTodayTasks(client, req.user.userId, enrollment);
+      const lang = getLanguage(req);
+      tasks = await getTodayTasks(client, req.user.userId, enrollment, lang);
       totalTasks = tasks.length;
       completedTasks = tasks.filter((t) => t.completionStatus === 'completed').length;
     }
@@ -1277,6 +1372,33 @@ app.get('/api/patient/modules/:moduleVersionId', authenticate, async (req, res) 
 
     const mod = moduleResult.rows[0];
 
+    // Apply translations
+    const lang = getLanguage(req);
+    let translatedTitle = mod.title;
+    let translatedSubtitle = mod.subtitle;
+    let translatedContent = mod.content;
+
+    if (lang !== 'tr') {
+      const transMap = await getTranslationsMap(client, 'content_module_versions', [mod.id], lang);
+      if (transMap[mod.id]) {
+        const trans = transMap[mod.id];
+        if (trans.title) translatedTitle = trans.title;
+        if (trans.subtitle) translatedSubtitle = trans.subtitle;
+
+        let contentObj = translatedContent || {};
+        if (typeof contentObj === 'string') {
+          try { contentObj = JSON.parse(contentObj); } catch(e) {}
+        }
+        for (const [key, value] of Object.entries(trans)) {
+          if (key.startsWith('content.')) {
+            const contentField = key.split('.')[1];
+            contentObj[contentField] = value;
+          }
+        }
+        translatedContent = contentObj;
+      }
+    }
+
     // Get progress for this module
     const progressResult = await client.query(
       `SELECT id, status, started_at, completed_at, progress_percent, result_data
@@ -1294,9 +1416,9 @@ app.get('/api/patient/modules/:moduleVersionId', authenticate, async (req, res) 
       module: {
         id: mod.id,
         moduleId: mod.module_id,
-        title: mod.title,
-        subtitle: mod.subtitle,
-        content: mod.content,
+        title: translatedTitle,
+        subtitle: translatedSubtitle,
+        content: translatedContent,
         settings: mod.settings,
         versionNumber: mod.version_number,
         moduleName: mod.module_name,
@@ -1494,7 +1616,8 @@ app.post('/api/patient/modules/:moduleVersionId/complete', authenticate, async (
     );
 
     // Evaluate Daily Tasks Streak
-    const todayTasks = await getTodayTasks(client, req.user.userId, enrollment);
+    const lang = getLanguage(req);
+    const todayTasks = await getTodayTasks(client, req.user.userId, enrollment, lang);
     const allCompleted = todayTasks.length > 0 && todayTasks.every(t => t.completionStatus === 'completed');
 
     if (allCompleted) {
@@ -1590,6 +1713,16 @@ app.get('/api/patient/questionnaires/:questionnaireVersionId', authenticate, asy
 
     const questionnaire = qvResult.rows[0];
 
+    const lang = getLanguage(req);
+    if (lang !== 'tr') {
+      const qvTransMap = await getTranslationsMap(client, 'forms_questionnaire_versions', [questionnaire.id], lang);
+      if (qvTransMap[questionnaire.id]) {
+        const trans = qvTransMap[questionnaire.id];
+        if (trans.title) questionnaire.title = trans.title;
+        if (trans.description_html) questionnaire.description_html = trans.description_html;
+      }
+    }
+
     // Get questions using the resolved questionnaire version id
     const questionsResult = await client.query(
       `SELECT id, question_key, question_type, label, description_html, placeholder, is_required, sort_order,
@@ -1599,6 +1732,21 @@ app.get('/api/patient/questionnaires/:questionnaireVersionId', authenticate, asy
        ORDER BY sort_order ASC`,
       [questionnaire.id]
     );
+
+    // Translate questions and options if needed
+    if (lang !== 'tr' && questionsResult.rows.length > 0) {
+      const questionIds = questionsResult.rows.map(q => q.id);
+      const qTransMap = await getTranslationsMap(client, 'forms_questions', questionIds, lang);
+      
+      for (const q of questionsResult.rows) {
+        if (qTransMap[q.id]) {
+          const trans = qTransMap[q.id];
+          if (trans.label) q.label = trans.label;
+          if (trans.description_html) q.description_html = trans.description_html;
+          if (trans.placeholder) q.placeholder = trans.placeholder;
+        }
+      }
+    }
 
     // Get options for each question
     const questions = [];
@@ -1610,6 +1758,17 @@ app.get('/api/patient/questionnaires/:questionnaireVersionId', authenticate, asy
          ORDER BY sort_order ASC`,
         [q.id]
       );
+
+      let options = optionsResult.rows;
+      if (lang !== 'tr' && options.length > 0) {
+        const optionIds = options.map(o => o.id);
+        const oTransMap = await getTranslationsMap(client, 'forms_question_options', optionIds, lang);
+        for (const o of options) {
+          if (oTransMap[o.id] && oTransMap[o.id].option_label) {
+            o.option_label = oTransMap[o.id].option_label;
+          }
+        }
+      }
 
       questions.push({
         id: q.id,
@@ -1623,7 +1782,7 @@ app.get('/api/patient/questionnaires/:questionnaireVersionId', authenticate, asy
         validationRules: q.validation_rules,
         displayRules: q.display_rules,
         metadata: q.metadata,
-        options: optionsResult.rows.map(o => ({
+        options: options.map(o => ({
           id: o.id,
           questionId: o.question_id,
           label: o.option_label,
@@ -1943,6 +2102,16 @@ app.get('/api/patient/checkins/:checkinTemplateVersionId', authenticate, async (
     const template = ctvResult.rows[0];
     const resolvedVersionId = template.id;
 
+    const lang = getLanguage(req);
+    if (lang !== 'tr') {
+      const ctvTransMap = await getTranslationsMap(client, 'forms_checkin_template_versions', [resolvedVersionId], lang);
+      if (ctvTransMap[resolvedVersionId]) {
+        const trans = ctvTransMap[resolvedVersionId];
+        if (trans.title) template.title = trans.title;
+        if (trans.description_html) template.description = trans.description_html; // Using description_html as description here since checkins often mix them up
+      }
+    }
+
     // Get fields
     const fieldsResult = await client.query(
       `SELECT id, field_key, label, field_type, is_required, sort_order,
@@ -1952,6 +2121,27 @@ app.get('/api/patient/checkins/:checkinTemplateVersionId', authenticate, async (
        ORDER BY sort_order ASC`,
       [resolvedVersionId]
     );
+
+    if (lang !== 'tr' && fieldsResult.rows.length > 0) {
+      const fieldIds = fieldsResult.rows.map(f => f.id);
+      const fTransMap = await getTranslationsMap(client, 'forms_checkin_fields', fieldIds, lang);
+      
+      for (const f of fieldsResult.rows) {
+        if (fTransMap[f.id]) {
+          const trans = fTransMap[f.id];
+          if (trans.label) f.label = trans.label;
+          if (trans.unit) {
+            // If the validation rules have a unit, translate it
+            if (f.validation_rules) {
+              if (typeof f.validation_rules === 'string') {
+                try { f.validation_rules = JSON.parse(f.validation_rules); } catch(e) {}
+              }
+              f.validation_rules.unit = trans.unit;
+            }
+          }
+        }
+      }
+    }
 
     // Check if already submitted today
     const enrollment = await getActiveEnrollment(client, req.user.userId);
@@ -2372,6 +2562,39 @@ app.post('/api/patient/notifications/:id/read', authenticate, async (req, res) =
 
 // ─── CONSENT ENDPOINTS ──────────────────────────────────────────────────────
 
+
+// GET /api/patient/faqs
+app.get('/api/patient/faqs', authenticate, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const result = await client.query(
+      `SELECT id, question, answer, order_index
+       FROM core_faqs
+       WHERE is_active = true
+       ORDER BY order_index ASC`
+    );
+
+    const lang = getLanguage(req);
+    if (lang !== 'tr' && result.rows.length > 0) {
+      const faqIds = result.rows.map(r => r.id);
+      const transMap = await getTranslationsMap(client, 'core_faqs', faqIds, lang);
+      for (const row of result.rows) {
+        if (transMap[row.id]) {
+          if (transMap[row.id].question) row.question = transMap[row.id].question;
+          if (transMap[row.id].answer) row.answer = transMap[row.id].answer;
+        }
+      }
+    }
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching faqs:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
 // GET /api/patient/consents
 app.get('/api/patient/consents', authenticate, async (req, res) => {
   const client = await pool.connect();
@@ -2385,6 +2608,18 @@ app.get('/api/patient/consents', authenticate, async (req, res) => {
          AND is_required = true
        ORDER BY created_at ASC`
     );
+
+    const lang = getLanguage(req);
+    if (lang !== 'tr' && docsResult.rows.length > 0) {
+      const docIds = docsResult.rows.map(d => d.id);
+      const transMap = await getTranslationsMap(client, 'core_consent_documents', docIds, lang);
+      for (const doc of docsResult.rows) {
+        if (transMap[doc.id]) {
+          if (transMap[doc.id].title) doc.title = transMap[doc.id].title;
+          if (transMap[doc.id].content_html) doc.content_html = transMap[doc.id].content_html;
+        }
+      }
+    }
 
     // Get user's accepted consents
     const acceptedResult = await client.query(
