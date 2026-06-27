@@ -2638,23 +2638,17 @@ app.get('/api/patient/consents', authenticate, async (req, res) => {
       id: doc.id,
       code: doc.code,
       title: doc.title,
-      contentHtml: doc.content_html,
-      versionNumber: doc.version_number,
-      documentType: doc.document_type,
-      isRequired: doc.is_required,
-      publishedAt: doc.published_at,
+      content_html: doc.content_html,
+      version_number: parseInt(doc.version_number) || 1,
+      document_type: doc.document_type,
+      is_required: doc.is_required,
+      status: doc.status,
+      published_at: doc.published_at,
       accepted: !!acceptedMap[doc.id],
-      acceptedAt: acceptedMap[doc.id] || null,
+      accepted_at: acceptedMap[doc.id] || null,
     }));
 
-    const allAccepted = documents.every((d) => d.accepted);
-
-    res.json({
-      documents,
-      allAccepted,
-      totalRequired: documents.length,
-      totalAccepted: documents.filter((d) => d.accepted).length,
-    });
+    res.json(documents);
   } catch (err) {
     console.error('Consents error:', err);
     res.status(500).json({ error: 'Internal server error' });
