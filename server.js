@@ -662,23 +662,85 @@ async function getTodayTasks(client, userId, enrollment, lang = 'tr') {
     let completionStatus = 'not_started';
     let progressData = null;
 
-    if (step.module_version_id) {
-      const progressResult = await client.query(
-        `SELECT id, status, started_at, completed_at, progress_percent, result_data
-         FROM patient_module_progress
-         WHERE enrollment_id = $1
-           AND patient_user_id = $2
-           AND module_version_id = $3
-           AND app_id = $4
-           AND day_number = $5
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [enrollment.id, userId, step.module_version_id, APP_ID, currentDay]
-      );
+    const todayStr = new Date().toISOString().split('T')[0];
 
-      if (progressResult.rows.length > 0) {
-        progressData = progressResult.rows[0];
-        completionStatus = progressData.status;
+    if (step.module_version_id) {
+      const qTypes = ['questionnaire', 'quiz', 'question_answer'];
+      const isQuestionnaire = qTypes.includes(step.module_type);
+      const isCheckin = (step.module_type === 'checkin' || step.module_type === 'daily_checkin');
+
+      if (isQuestionnaire) {
+        let contentObj = step.module_content || {};
+        if (typeof contentObj === 'string') {
+          try { contentObj = JSON.parse(contentObj); } catch(e) {}
+        }
+        const targetQId = contentObj.questionnaireId || contentObj.formId;
+        if (targetQId) {
+          const qResp = await client.query(
+            `SELECT pqr.id, pqr.status, pqr.submitted_at as completed_at
+             FROM patient_questionnaire_responses pqr
+             JOIN forms_questionnaire_versions fqv ON fqv.id = pqr.questionnaire_version_id
+             WHERE pqr.enrollment_id = $1 
+               AND pqr.patient_user_id = $2 
+               AND (fqv.questionnaire_id = $3 OR fqv.id = $3)
+               AND DATE(pqr.submitted_at AT TIME ZONE 'UTC') = $4
+             ORDER BY pqr.submitted_at DESC
+             LIMIT 1`,
+            [enrollment.id, userId, targetQId, todayStr]
+          );
+          if (qResp.rows.length > 0) {
+            progressData = {
+              status: qResp.rows[0].status,
+              completed_at: qResp.rows[0].completed_at
+            };
+            completionStatus = qResp.rows[0].status === 'completed' ? 'completed' : 'not_started';
+          }
+        }
+      } else if (isCheckin) {
+        let contentObj = step.module_content || {};
+        if (typeof contentObj === 'string') {
+          try { contentObj = JSON.parse(contentObj); } catch(e) {}
+        }
+        const targetCheckinId = contentObj.checkinTemplateId || contentObj.formId;
+        if (targetCheckinId) {
+          const cResp = await client.query(
+            `SELECT pcs.id, pcs.checkin_date as completed_at
+             FROM patient_checkin_submissions pcs
+             JOIN forms_checkin_template_versions fctv ON fctv.id = pcs.checkin_template_version_id
+             WHERE pcs.enrollment_id = $1 
+               AND pcs.patient_user_id = $2 
+               AND (fctv.checkin_template_id = $3 OR fctv.id = $3)
+               AND pcs.checkin_date = $4
+             ORDER BY pcs.created_at DESC
+             LIMIT 1`,
+            [enrollment.id, userId, targetCheckinId, todayStr]
+          );
+          if (cResp.rows.length > 0) {
+            progressData = {
+              status: 'completed',
+              completed_at: cResp.rows[0].completed_at
+            };
+            completionStatus = 'completed';
+          }
+        }
+      } else {
+        const progressResult = await client.query(
+          `SELECT id, status, started_at, completed_at, progress_percent, result_data
+           FROM patient_module_progress
+           WHERE enrollment_id = $1
+             AND patient_user_id = $2
+             AND module_version_id = $3
+             AND app_id = $4
+             AND day_number = $5
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [enrollment.id, userId, step.module_version_id, APP_ID, currentDay]
+        );
+
+        if (progressResult.rows.length > 0) {
+          progressData = progressResult.rows[0];
+          completionStatus = progressData.status;
+        }
       }
     }
 
