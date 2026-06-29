@@ -685,10 +685,9 @@ async function getTodayTasks(client, userId, enrollment, lang = 'tr') {
              WHERE pqr.enrollment_id = $1 
                AND pqr.patient_user_id = $2 
                AND (fqv.questionnaire_id = $3 OR fqv.id = $3)
-               AND DATE(pqr.submitted_at AT TIME ZONE 'UTC') = $4::date
              ORDER BY pqr.submitted_at DESC
              LIMIT 1`,
-            [enrollment.id, userId, targetQId, todayStr]
+            [enrollment.id, userId, targetQId]
           );
           if (qResp.rows.length > 0) {
             progressData = {
@@ -716,7 +715,7 @@ async function getTodayTasks(client, userId, enrollment, lang = 'tr') {
                AND pcs.patient_user_id = $2 
                AND (fctv.checkin_template_id = $3 OR fctv.id = $3)
                AND pcs.checkin_date = $4::date
-             ORDER BY pcs.created_at DESC
+             ORDER BY pcs.id DESC
              LIMIT 1`,
             [enrollment.id, userId, targetCheckinId, todayStr]
           );
