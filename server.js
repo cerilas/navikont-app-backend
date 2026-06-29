@@ -692,6 +692,7 @@ async function getTodayTasks(client, userId, enrollment, lang = 'tr') {
           );
           if (qResp.rows.length > 0) {
             progressData = {
+              id: qResp.rows[0].id,
               status: qResp.rows[0].status,
               completed_at: qResp.rows[0].completed_at
             };
@@ -721,6 +722,7 @@ async function getTodayTasks(client, userId, enrollment, lang = 'tr') {
           );
           if (cResp.rows.length > 0) {
             progressData = {
+              id: cResp.rows[0].id,
               status: 'completed',
               completed_at: cResp.rows[0].completed_at
             };
