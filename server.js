@@ -675,7 +675,9 @@ async function getTodayTasks(client, userId, enrollment, lang = 'tr') {
           try { contentObj = JSON.parse(contentObj); } catch(e) {}
         }
         const targetQId = contentObj.questionnaireId || contentObj.formId;
-        if (targetQId) {
+        const isUUID = targetQId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(targetQId);
+        
+        if (isUUID) {
           const qResp = await client.query(
             `SELECT pqr.id, pqr.status, pqr.submitted_at as completed_at
              FROM patient_questionnaire_responses pqr
@@ -683,7 +685,7 @@ async function getTodayTasks(client, userId, enrollment, lang = 'tr') {
              WHERE pqr.enrollment_id = $1 
                AND pqr.patient_user_id = $2 
                AND (fqv.questionnaire_id = $3 OR fqv.id = $3)
-               AND DATE(pqr.submitted_at AT TIME ZONE 'UTC') = $4
+               AND DATE(pqr.submitted_at AT TIME ZONE 'UTC') = $4::date
              ORDER BY pqr.submitted_at DESC
              LIMIT 1`,
             [enrollment.id, userId, targetQId, todayStr]
@@ -702,7 +704,9 @@ async function getTodayTasks(client, userId, enrollment, lang = 'tr') {
           try { contentObj = JSON.parse(contentObj); } catch(e) {}
         }
         const targetCheckinId = contentObj.checkinTemplateId || contentObj.formId;
-        if (targetCheckinId) {
+        const isUUID = targetCheckinId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(targetCheckinId);
+
+        if (isUUID) {
           const cResp = await client.query(
             `SELECT pcs.id, pcs.checkin_date as completed_at
              FROM patient_checkin_submissions pcs
@@ -710,7 +714,7 @@ async function getTodayTasks(client, userId, enrollment, lang = 'tr') {
              WHERE pcs.enrollment_id = $1 
                AND pcs.patient_user_id = $2 
                AND (fctv.checkin_template_id = $3 OR fctv.id = $3)
-               AND pcs.checkin_date = $4
+               AND pcs.checkin_date = $4::date
              ORDER BY pcs.created_at DESC
              LIMIT 1`,
             [enrollment.id, userId, targetCheckinId, todayStr]
