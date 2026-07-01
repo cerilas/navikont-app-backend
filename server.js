@@ -567,18 +567,13 @@ app.put('/api/patient/enrollment/current-day', authenticate, async (req, res) =>
     await client.query('BEGIN');
 
     // Get current enrollment to know which day we are completing
-    const enrollmentResult = await client.query(
-      `SELECT id, current_day FROM patient_app_enrollments 
-       WHERE patient_user_id = $1 AND status IN ('active', 'activated')`,
-      [req.user.userId]
-    );
+    const enrollment = await getActiveEnrollment(client, req.user.userId);
 
-    if (enrollmentResult.rows.length === 0) {
+    if (!enrollment) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'No active enrollment found to update' });
     }
 
-    const enrollment = enrollmentResult.rows[0];
     const previousDay = enrollment.current_day || 1;
 
     // Record the completion of the previous day
