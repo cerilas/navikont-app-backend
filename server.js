@@ -2076,10 +2076,13 @@ app.post('/api/patient/questionnaires/:questionnaireVersionId/submit', authentic
       }
 
       if (assignedJourneyId) {
-        // Assign the journey
+        // Assign the journey and activate the enrollment
         await client.query(`
           UPDATE patient_app_enrollments
           SET journey_id = $1, 
+              status = 'active',
+              start_date = COALESCE(start_date, CURRENT_DATE),
+              activated_at = COALESCE(activated_at, NOW()),
               updated_at = NOW(),
               metadata = COALESCE(metadata, '{}'::jsonb) || '{"auto_assigned": true}'::jsonb
           WHERE id = $2
