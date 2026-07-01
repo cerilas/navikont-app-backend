@@ -117,7 +117,7 @@ async function getActiveEnrollment(client, userId) {
     `SELECT * FROM patient_app_enrollments
      WHERE patient_user_id = $1
        AND app_id = $2
-       AND status IN ('active', 'activated')
+       AND status IN ('active', 'activated', 'invited')
      ORDER BY activated_at DESC NULLS LAST, created_at DESC
      LIMIT 1`,
     [userId, APP_ID]
