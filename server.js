@@ -2236,15 +2236,27 @@ app.get('/api/patient/checkins/:checkinTemplateVersionId', authenticate, async (
       versionNumber: template.version_number,
       settings: template.settings,
       templateName: template.template_name,
-      fields: fieldsResult.rows.map((f) => ({
-        id: f.id,
-        fieldKey: f.field_key,
-        label: f.label,
-        fieldType: f.field_type,
-        isRequired: f.is_required,
-        sortOrder: f.sort_order,
-        validationRules: f.validation_rules,
-      })),
+      fields: fieldsResult.rows.map((f) => {
+        let vr = f.validation_rules;
+        if (typeof vr === 'string') { try { vr = JSON.parse(vr); } catch(_) { vr = {}; } }
+        vr = vr || {};
+        const opts = Array.isArray(vr.options) ? vr.options.map((o, i) => ({
+          id: o.value ?? String(i),
+          label: o.label,
+          value: o.value ?? String(i),
+          sortOrder: o.order ?? i,
+        })) : undefined;
+        return {
+          id: f.id,
+          fieldKey: f.field_key,
+          label: f.label,
+          description: vr.description ?? null,
+          fieldType: f.field_type,
+          isRequired: f.is_required,
+          sortOrder: f.sort_order,
+          options: opts,
+        };
+      }),
       todaySubmission,
     });
   } catch (err) {
