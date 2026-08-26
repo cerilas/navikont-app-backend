@@ -2298,10 +2298,15 @@ app.post('/api/patient/checkins/:checkinTemplateVersionId/submit', authenticate,
 
     let resolvedParamId = checkinTemplateVersionId;
     let isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resolvedParamId);
+    let moduleVersionId = null; // captured for patient_module_progress
 
     if (isUUID) {
-      const moduleRes = await client.query(`SELECT content FROM content_module_versions WHERE module_id = $1 ORDER BY version_number DESC LIMIT 1`, [resolvedParamId]);
+      const moduleRes = await client.query(
+        `SELECT id, content FROM content_module_versions WHERE module_id = $1 ORDER BY version_number DESC LIMIT 1`,
+        [resolvedParamId]
+      );
       if (moduleRes.rows.length > 0 && moduleRes.rows[0].content && moduleRes.rows[0].content.checkinTemplateId) {
+        moduleVersionId = moduleRes.rows[0].id;
         resolvedParamId = moduleRes.rows[0].content.checkinTemplateId;
         isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resolvedParamId);
       }
@@ -2483,10 +2488,53 @@ app.post('/api/patient/checkins/:checkinTemplateVersionId/submit', authenticate,
       );
     }
 
+    // Upsert patient_module_progress so admin panel can see the completion
+    if (moduleVersionId) {
+      const existingPmp = await client.query(
+        `SELECT id FROM patient_module_progress
+         WHERE enrollment_id = $1 AND patient_user_id = $2
+           AND module_version_id = $3 AND app_id = $4
+           AND day_number = $5`,
+        [enrollment.id, req.user.userId, moduleVersionId, APP_ID, enrollment.current_day || 1]
+      );
+
+      const resultData = JSON.stringify({
+        checkinSubmissionId: submissionResult.rows[0].id,
+        checkinDate: today,
+        streakDay,
+      });
+
+      if (existingPmp.rows.length > 0) {
+        await client.query(
+          `UPDATE patient_module_progress
+           SET status = 'completed', completed_at = NOW(),
+               progress_percent = 100, result_data = $1, updated_at = NOW()
+           WHERE id = $2`,
+          [resultData, existingPmp.rows[0].id]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO patient_module_progress
+             (id, enrollment_id, patient_user_id, app_id, app_version_id,
+              module_version_id, status, started_at, completed_at,
+              progress_percent, result_data, created_at, updated_at, day_number)
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5,
+                   'completed', NOW(), NOW(), 100, $6, NOW(), NOW(), $7)`,
+          [
+            enrollment.id, req.user.userId, APP_ID, enrollment.app_version_id,
+            moduleVersionId, resultData, enrollment.current_day || 1,
+          ]
+        );
+      }
+    }
+
     await client.query('COMMIT');
 
     res.json({
       success: true,
+      id: submissionResult.rows[0].id,
+      streakCount: streakDay,
+      message: 'Check-in kaydedildi',
       submission: submissionResult.rows[0],
       streak: {
         currentStreak,
