@@ -7,6 +7,7 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -2240,12 +2241,21 @@ app.get('/api/patient/checkins/:checkinTemplateVersionId', authenticate, async (
         let vr = f.validation_rules;
         if (typeof vr === 'string') { try { vr = JSON.parse(vr); } catch(_) { vr = {}; } }
         vr = vr || {};
-        const opts = Array.isArray(vr.options) ? vr.options.map((o, i) => ({
-          id: o.value ?? String(i),
-          label: o.label,
-          value: o.value ?? String(i),
-          sortOrder: o.order ?? i,
-        })) : undefined;
+        // Derive a stable UUID from field id + option value so the iOS
+        // UUID decoder succeeds on the current deployed app build.
+        const opts = Array.isArray(vr.options) ? vr.options.map((o, i) => {
+          const seed = `${f.id}:${o.value ?? i}`;
+          const hash = crypto.createHash('md5').update(seed).digest('hex');
+          const deterministicUUID =
+            `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-` +
+            `${((parseInt(hash.slice(16,17),16)&0x3)|0x8).toString(16)}${hash.slice(17,20)}-${hash.slice(20,32)}`;
+          return {
+            id: deterministicUUID,
+            label: o.label,
+            value: o.value ?? String(i),
+            sortOrder: o.order ?? i,
+          };
+        }) : undefined;
         return {
           id: f.id,
           fieldKey: f.field_key,
