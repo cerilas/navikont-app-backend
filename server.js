@@ -8,6 +8,7 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { getClinicalBundle, registerClinicalApi } = require('./clinical-api');
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -1187,6 +1188,7 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
     }
 
     if (enrollment.status === 'paused' || enrollment.status === 'cancelled' || enrollment.status === 'not_eligible') {
+      const clinical = await getClinicalBundle(client, enrollment, req.user.userId);
       return res.json({
         enrollment: {
           id: enrollment.id,
@@ -1202,6 +1204,7 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
         streak: { current_streak: 0, longest_streak: 0 },
         progress: { totalSteps: 1, completedModules: 0, progressPercent: 0 },
         unreadNotificationCount: 0,
+        ...clinical,
       });
     }
 
@@ -1308,6 +1311,7 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
                  `, [JSON.stringify({ not_eligible_reason: 'no_matching_rule', score: totalScore }), enrollment.id]);
                } catch (_) { /* ignore */ }
 
+               const clinical = await getClinicalBundle(client, { ...enrollment, status: 'not_eligible' }, req.user.userId);
                return res.json({
                  enrollment: {
                    id: enrollment.id,
@@ -1323,6 +1327,7 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
                  streak: { current_streak: 0, longest_streak: 0 },
                  progress: { totalSteps: 1, completedModules: 0, progressPercent: 0 },
                  unreadNotificationCount: 0,
+                 ...clinical,
                });
              }
 
@@ -1423,6 +1428,8 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
       streakData.current_streak = enrollment.current_day || 1;
     }
 
+    const clinical = await getClinicalBundle(client, enrollment, req.user.userId);
+
     res.json({
       enrollment: {
         id: enrollment.id,
@@ -1447,6 +1454,7 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
       streak: streakData,
       notifications: notifResult.rows,
       unreadNotificationCount,
+      ...clinical,
     });
   } catch (err) {
     console.error('Dashboard error:', err);
@@ -3006,6 +3014,13 @@ app.get('/api/patient/streak', authenticate, async (req, res) => {
 });
 
 // ─── HEALTH CHECK ────────────────────────────────────────────────────────────
+
+registerClinicalApi({
+  app,
+  pool,
+  authenticate,
+  getEnrollment: getLatestEnrollment,
+});
 
 app.get('/api/health', async (req, res) => {
   try {
