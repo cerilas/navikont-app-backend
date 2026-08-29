@@ -527,6 +527,17 @@ test('loads published plan versions with explicit UUID parameter casts', async (
   assert.equal(result.currentVersion.id, version.id);
 });
 
+test('maps clinician plan fields to patient-facing lists', () => {
+  assert.deepEqual(
+    _test.planContentList(undefined, 'Tuvalet aralığını kontrollü uzatın.'),
+    ['Tuvalet aralığını kontrollü uzatın.']
+  );
+  assert.deepEqual(
+    _test.planContentList(['Birinci adım', 'İkinci adım'], 'Yedek metin'),
+    ['Birinci adım', 'İkinci adım']
+  );
+});
+
 test('returns a legacy-safe state before the migration exists', async () => {
   const client = {
     async query() {

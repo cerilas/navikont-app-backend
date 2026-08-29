@@ -360,6 +360,13 @@ function planSummary(plan) {
   };
 }
 
+function planContentList(value, fallback) {
+  if (Array.isArray(value)) return value.filter(Boolean).map(String);
+  if (value != null && String(value).trim()) return [String(value)];
+  if (fallback != null && String(fallback).trim()) return [String(fallback)];
+  return [];
+}
+
 async function getClinicalBundle(client, enrollment, userId) {
   const ntmsEnabled = enrollment?.metadata?.ntms_enabled === true && enrollment?.metadata?.legacy_mode !== true;
   if (!enrollment || !ntmsEnabled || !(await clinicalSchemaAvailable(client))) {
@@ -997,8 +1004,8 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
         title: content.title || summary.title || 'Tedavi Planım',
         summary: content.summary || summary.summary,
         status: plan.status,
-        goals: content.goals || [],
-        instructions: content.instructions || [],
+        goals: planContentList(content.goals, content.patientGoal),
+        instructions: planContentList(content.instructions, content.clinicianInstructions),
         parameters: content.parameters || content,
         publishedAt: plan.updated_at,
       });
@@ -1267,6 +1274,7 @@ module.exports = {
     idForKey,
     isMissingSchemaError,
     loadActivePlan,
+    planContentList,
     validateDiaryEventPayload,
   },
 };
