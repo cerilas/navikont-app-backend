@@ -1192,18 +1192,16 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
           id: enrollment.id,
           status: enrollment.status,
           currentDay: enrollment.current_day,
-          progressPercent: enrollment.progress_percent,
+          progressPercent: String(enrollment.progress_percent ?? '0'),
           startDate: enrollment.start_date,
           endDate: enrollment.end_date,
           activatedAt: enrollment.activated_at,
         },
         today: null,
         tasks: [],
-        streak: { currentStreak: 0, longestStreak: 0 },
-        progressPercent: enrollment.progress_percent || 0,
-        totalSteps: 1,
-        completedModules: 0,
-        moduleProgress: []
+        streak: { current_streak: 0, longest_streak: 0 },
+        progress: { totalSteps: 1, completedModules: 0, progressPercent: 0 },
+        unreadNotificationCount: 0,
       });
     }
 
@@ -1211,6 +1209,7 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
     let tasks = [];
     let totalTasks = 0;
     let completedTasks = 0;
+    const lang = getLanguage(req);
 
     if (!enrollment.journey_id) {
       // Automatic conditional assignment expected, check for onboarding_trigger rule
@@ -1239,8 +1238,9 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
           const qv = qvResult.rows[0];
           // Check if user already submitted it
           const submittedRes = await client.query(
-            `SELECT id FROM patient_questionnaire_responses
-             WHERE enrollment_id = $1 AND patient_user_id = $2 AND questionnaire_version_id = $3`,
+            `SELECT id, total_score FROM patient_questionnaire_responses
+             WHERE enrollment_id = $1 AND patient_user_id = $2 AND questionnaire_version_id = $3
+             ORDER BY submitted_at DESC LIMIT 1`,
             [enrollment.id, req.user.userId, qv.id]
           );
 
@@ -1270,8 +1270,63 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
                 completionStatus: "not_started",
                 progress: null
              }];
+             totalTasks = 1;
           } else {
-             // Inject 'Pending Review' Article
+             // Submitted but no journey — check if score matches any assignment/followup rule.
+             // Out of range → not_eligible (doctor screen). Never 500.
+             const totalScore = parseFloat(submittedRes.rows[0].total_score) || 0;
+
+             const assignRules = await client.query(`
+               SELECT condition, actions FROM core_rules
+               WHERE target_type = 'app' AND target_id = $1
+                 AND rule_type IN ('journey_assignment', 'questionnaire_followup')
+                 AND is_active = true
+             `, [APP_ID]);
+
+             let matched = false;
+             for (const rule of assignRules.rows) {
+               const cond = typeof rule.condition === 'string'
+                 ? (() => { try { return JSON.parse(rule.condition); } catch(_) { return {}; } })()
+                 : (rule.condition || {});
+               const scoreMin = cond.scoreMin !== undefined ? Number(cond.scoreMin) : -Infinity;
+               const scoreMax = cond.scoreMax !== undefined ? Number(cond.scoreMax) : Infinity;
+               if (totalScore >= scoreMin && totalScore <= scoreMax) {
+                 matched = true;
+                 break;
+               }
+             }
+
+             if (!matched || enrollment.status === 'not_eligible' || enrollment.metadata?.not_eligible_reason) {
+               // Persist not_eligible (best-effort) and return blocked enrollment payload
+               try {
+                 await client.query(`
+                   UPDATE patient_app_enrollments
+                   SET status = 'not_eligible',
+                       updated_at = NOW(),
+                       metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
+                   WHERE id = $2 AND journey_id IS NULL
+                 `, [JSON.stringify({ not_eligible_reason: 'no_matching_rule', score: totalScore }), enrollment.id]);
+               } catch (_) { /* ignore */ }
+
+               return res.json({
+                 enrollment: {
+                   id: enrollment.id,
+                   status: 'not_eligible',
+                   currentDay: enrollment.current_day,
+                   progressPercent: String(enrollment.progress_percent ?? '0'),
+                   startDate: enrollment.start_date,
+                   endDate: enrollment.end_date,
+                   activatedAt: enrollment.activated_at,
+                 },
+                 today: null,
+                 tasks: [],
+                 streak: { current_streak: 0, longest_streak: 0 },
+                 progress: { totalSteps: 1, completedModules: 0, progressPercent: 0 },
+                 unreadNotificationCount: 0,
+               });
+             }
+
+             // Score matched a rule but journey not yet assigned (e.g. followup or manual) — pending review
              tasks = [{
                 stepId: crypto.randomUUID(),
                 dayNumber: 1,
@@ -1294,12 +1349,11 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
                 completionStatus: "completed",
                 progress: null
              }];
+             totalTasks = 1;
           }
-          totalTasks = 1;
         }
       }
     } else {
-      const lang = getLanguage(req);
       tasks = await getTodayTasks(client, req.user.userId, enrollment, lang);
       totalTasks = tasks.length;
       completedTasks = tasks.filter((t) => t.completionStatus === 'completed').length;
@@ -2089,45 +2143,53 @@ app.post('/api/patient/questionnaires/:questionnaireVersionId/submit', authentic
           WHERE id = $2
         `, [assignedJourneyId, enrollment.id]);
       } else {
-        // No rule matched — also check if a questionnaire_followup rule applies
-        const followupRuleRes = await client.query(`
-          SELECT condition, actions
-          FROM core_rules
-          WHERE target_type = 'app' AND target_id = $1 AND rule_type = 'questionnaire_followup' AND is_active = true
-          ORDER BY priority DESC
-        `, [APP_ID]);
-
+        // No journey rule matched — check followup; otherwise mark not_eligible
         let hasFollowup = false;
-        for (const rule of followupRuleRes.rows) {
-          const cond = rule.condition || {};
-          const scoreMin = cond.scoreMin !== undefined ? cond.scoreMin : -Infinity;
-          const scoreMax = cond.scoreMax !== undefined ? cond.scoreMax : Infinity;
-          if (totalScore >= scoreMin && totalScore <= scoreMax) {
-            hasFollowup = true;
-            break;
+        try {
+          const followupRuleRes = await client.query(`
+            SELECT condition, actions
+            FROM core_rules
+            WHERE target_type = 'app' AND target_id = $1 AND rule_type = 'questionnaire_followup' AND is_active = true
+            ORDER BY priority DESC
+          `, [APP_ID]);
+
+          for (const rule of followupRuleRes.rows) {
+            const cond = rule.condition || {};
+            const scoreMin = cond.scoreMin !== undefined ? Number(cond.scoreMin) : -Infinity;
+            const scoreMax = cond.scoreMax !== undefined ? Number(cond.scoreMax) : Infinity;
+            if (totalScore >= scoreMin && totalScore <= scoreMax) {
+              hasFollowup = true;
+              break;
+            }
           }
-        }
+        } catch (_) { /* ignore followup check errors */ }
 
         if (!hasFollowup) {
-          // No journey and no followup questionnaire — patient doesn't meet any criteria
-          await client.query(`
-            UPDATE patient_app_enrollments
-            SET status = 'not_eligible',
-                updated_at = NOW(),
-                metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
-            WHERE id = $2
-          `, [
-            JSON.stringify({ not_eligible_reason: 'no_matching_rule', score: totalScore }),
-            enrollment.id,
-          ]);
+          try {
+            await client.query(`
+              UPDATE patient_app_enrollments
+              SET status = 'not_eligible',
+                  updated_at = NOW(),
+                  metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
+              WHERE id = $2
+            `, [
+              JSON.stringify({ not_eligible_reason: 'no_matching_rule', score: totalScore }),
+              enrollment.id,
+            ]);
+          } catch (_) { /* never fail submit over status write */ }
         }
       }
     }
 
     await client.query('COMMIT');
 
+    // Flat fields so iOS QuestionnaireSubmissionResponse decodes cleanly
     res.json({
       success: true,
+      id: responseId,
+      totalScore,
+      riskLevel,
+      message: 'Anket kaydedildi',
       response: {
         id: responseId,
         totalScore,
