@@ -20,6 +20,9 @@ const CLINICAL_TABLES = [
 ];
 
 const columnCache = new Map();
+const EDITABLE_DIARY_STATES = ['draft', 'active', 'in_progress'];
+const DIARY_EVENT_TYPES = ['void', 'fluid', 'leakage', 'sleep_start', 'sleep_end'];
+const MATERIAL_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 
 function isMissingSchemaError(error) {
   return ['42P01', '42703'].includes(error?.code);
@@ -150,6 +153,104 @@ function latestByDate(rows) {
   return rows[0] || null;
 }
 
+function editableDiarySession(row) {
+  return EDITABLE_DIARY_STATES.includes(String(row?.state || row?.status || '').toLowerCase());
+}
+
+function normalizeDiaryEventType(value) {
+  const eventType = String(value || '').toLowerCase();
+  return eventType === 'urination' ? 'void' : eventType;
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function validationFailure(error, code = 'VALIDATION_ERROR', status = 400) {
+  return { error, code, status };
+}
+
+function validateDiaryEventPayload(payload, session, currentEvent = null) {
+  const eventType = normalizeDiaryEventType(
+    payload.eventType ?? payload.type ?? currentEvent?.event_type
+  );
+  if (!DIARY_EVENT_TYPES.includes(eventType)) {
+    return validationFailure('Invalid event type');
+  }
+
+  const occurredAtValue = hasOwn(payload, 'occurredAt') ? payload.occurredAt : currentEvent?.occurred_at;
+  const occurredAt = occurredAtValue ? new Date(occurredAtValue) : new Date();
+  if (Number.isNaN(occurredAt.getTime())) {
+    return validationFailure('Invalid occurredAt');
+  }
+  if (occurredAt < new Date(session.starts_at) || occurredAt > new Date(session.ends_at)) {
+    return validationFailure('Event is outside the diary window', 'EVENT_OUTSIDE_WINDOW', 422);
+  }
+  if (occurredAt.getTime() > Date.now() + MATERIAL_FUTURE_TOLERANCE_MS) {
+    return validationFailure('Event cannot be future-dated', 'EVENT_FUTURE_DATED', 422);
+  }
+
+  const sameType = currentEvent && normalizeDiaryEventType(currentEvent.event_type) === eventType;
+  const urgencyValue = hasOwn(payload, 'urgencyLevel')
+    ? payload.urgencyLevel
+    : hasOwn(payload, 'urgency')
+      ? payload.urgency
+      : sameType ? currentEvent.urgency_score : null;
+  if (urgencyValue != null &&
+      (!Number.isInteger(Number(urgencyValue)) || Number(urgencyValue) < 0 || Number(urgencyValue) > 4)) {
+    return validationFailure('Urgency must be an integer between 0 and 4');
+  }
+
+  const measured = hasOwn(payload, 'measured')
+    ? Boolean(payload.measured)
+    : hasOwn(payload, 'unableToMeasure')
+      ? !Boolean(payload.unableToMeasure)
+      : sameType ? currentEvent.is_measured : true;
+  const amountValue = hasOwn(payload, 'amountMl')
+    ? payload.amountMl
+    : sameType ? currentEvent.volume_ml : null;
+  const leakageAmount = hasOwn(payload, 'leakageAmount')
+    ? payload.leakageAmount
+    : sameType ? currentEvent.leakage_amount : null;
+  const fluidType = hasOwn(payload, 'fluidType')
+    ? payload.fluidType
+    : sameType ? currentEvent.fluid_type : null;
+
+  if (['void', 'fluid'].includes(eventType) && measured) {
+    const amount = Number(amountValue);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return validationFailure('Measured void and fluid events require a positive amountMl');
+    }
+  }
+  if (eventType === 'leakage' &&
+      (leakageAmount == null || String(leakageAmount).trim() === '')) {
+    return validationFailure('Leakage events require leakageAmount');
+  }
+  if (eventType.startsWith('sleep_')) {
+    const sleepFields = [
+      hasOwn(payload, 'amountMl') ? payload.amountMl : null,
+      hasOwn(payload, 'urgencyLevel') ? payload.urgencyLevel : null,
+      hasOwn(payload, 'urgency') ? payload.urgency : null,
+      hasOwn(payload, 'leakageAmount') ? payload.leakageAmount : null,
+    ];
+    if (sleepFields.some((value) => value != null)) {
+      return validationFailure('Sleep events must not include volume, urgency, or leakage');
+    }
+  }
+
+  return {
+    eventType,
+    occurredAt,
+    urgencyScore: ['void', 'leakage'].includes(eventType) && urgencyValue != null
+      ? Number(urgencyValue)
+      : null,
+    measured: ['void', 'fluid'].includes(eventType) ? measured : false,
+    amountMl: ['void', 'fluid'].includes(eventType) && measured ? Number(amountValue) : null,
+    leakageAmount: eventType === 'leakage' ? leakageAmount : null,
+    fluidType: eventType === 'fluid' ? (fluidType ?? null) : null,
+  };
+}
+
 function formatDiaryEvent(row) {
   const metadata = row.metadata || {};
   return {
@@ -157,10 +258,11 @@ function formatDiaryEvent(row) {
     sessionId: row.diary_session_id,
     type: row.event_type,
     occurredAt: row.occurred_at,
-    recordedAt: row.created_at,
+    recordedAt: row.captured_at || row.created_at,
     amountMl: row.volume_ml == null ? null : Number(row.volume_ml),
     urgency: row.urgency_score,
     leakageAmount: row.leakage_amount,
+    fluidType: row.fluid_type ?? null,
     measured: row.is_measured ?? metadata.unableToMeasure !== true,
     retrospective: row.time_entry_mode === 'retrospective' || metadata.isRetrospective === true,
     note: row.notes,
@@ -262,7 +364,13 @@ async function getClinicalBundle(client, enrollment, userId) {
   const ntmsEnabled = enrollment?.metadata?.ntms_enabled === true && enrollment?.metadata?.legacy_mode !== true;
   if (!enrollment || !ntmsEnabled || !(await clinicalSchemaAvailable(client))) {
     return {
-      clinicalState: { enabled: false, mode: 'legacy', currentModule: null, state: 'legacy' },
+      clinicalState: {
+        enabled: false,
+        mode: 'legacy',
+        currentModule: null,
+        state: 'legacy',
+        testModeEnabled: false,
+      },
       gates: [],
       activePlanSummary: null,
     };
@@ -413,6 +521,7 @@ async function getClinicalBundle(client, enrollment, userId) {
         moduleSessions: sessionsByModule,
         latestDecision,
         awaitingClinician: submittedDiary && !diaryReviewed,
+        testModeEnabled: enrollment.metadata?.clinical_test_mode === true,
       },
       gates: gateList,
       activePlanSummary: planSummary(plan),
@@ -421,7 +530,13 @@ async function getClinicalBundle(client, enrollment, userId) {
   } catch (error) {
     if (isMissingSchemaError(error)) {
       return {
-        clinicalState: { enabled: false, mode: 'legacy', currentModule: null, state: 'legacy' },
+        clinicalState: {
+          enabled: false,
+          mode: 'legacy',
+          currentModule: null,
+          state: 'legacy',
+          testModeEnabled: false,
+        },
         gates: [],
         activePlanSummary: null,
       };
@@ -543,6 +658,7 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
         client,
         `SELECT * FROM clinical_bladder_diary_sessions
           WHERE enrollment_id = $1
+            AND state IN ('draft', 'active', 'in_progress')
           ORDER BY created_at DESC LIMIT 1`,
         [enrollment.id]
       );
@@ -551,7 +667,7 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
       const events = await safeRows(
         client,
         `SELECT * FROM clinical_bladder_diary_events
-          WHERE diary_session_id = $1
+          WHERE diary_session_id = $1 AND voided_at IS NULL
           ORDER BY occurred_at ASC`,
         [session.id]
       );
@@ -572,6 +688,10 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
         await client.query('ROLLBACK');
         return noEnrollment(res);
       }
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
+        [enrollment.id]
+      );
       const current = await safeRows(
         client,
         `SELECT * FROM clinical_bladder_diary_sessions
@@ -614,9 +734,8 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
   });
 
   app.post('/api/patient/m2/events', authenticate, async (req, res) => {
-    const requestedEventType = String(req.body.eventType || req.body.type || '').toLowerCase();
-    const eventType = requestedEventType === 'urination' ? 'void' : requestedEventType;
-    if (!['void', 'fluid', 'leakage', 'sleep_start', 'sleep_end'].includes(eventType)) {
+    const eventType = normalizeDiaryEventType(req.body.eventType || req.body.type);
+    if (!DIARY_EVENT_TYPES.includes(eventType)) {
       return res.status(400).json({ error: 'Invalid event type', code: 'VALIDATION_ERROR' });
     }
     const key = idempotencyKey(req);
@@ -645,40 +764,31 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Diary session not found', code: 'SESSION_NOT_FOUND' });
       }
-      if (!['draft', 'active', 'in_progress'].includes(String(session.state || session.status).toLowerCase())) {
+      if (!editableDiarySession(session)) {
         await client.query('ROLLBACK');
         return res.status(409).json({ error: 'Diary session is not editable', code: 'SESSION_CLOSED' });
       }
-      const occurredAt = req.body.occurredAt ? new Date(req.body.occurredAt) : new Date();
-      if (Number.isNaN(occurredAt.getTime())) {
+      const validated = validateDiaryEventPayload(req.body, session);
+      if (validated.error) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Invalid occurredAt', code: 'VALIDATION_ERROR' });
-      }
-      if (occurredAt < new Date(session.starts_at) || occurredAt > new Date(session.ends_at)) {
-        await client.query('ROLLBACK');
-        return res.status(422).json({ error: 'Event is outside the diary window', code: 'EVENT_OUTSIDE_WINDOW' });
-      }
-      const urgencyScore = req.body.urgencyLevel ?? req.body.urgency;
-      if (urgencyScore != null && (!Number.isInteger(Number(urgencyScore)) || Number(urgencyScore) < 0 || Number(urgencyScore) > 4)) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Urgency must be between 0 and 4', code: 'VALIDATION_ERROR' });
+        return res.status(validated.status).json({ error: validated.error, code: validated.code });
       }
       const isRetrospective = Boolean(req.body.isRetrospective ?? req.body.retrospective);
-      const isMeasured = req.body.measured ?? !Boolean(req.body.unableToMeasure);
       const event = await insertCompatible(client, 'clinical_bladder_diary_events', {
         id: idForKey(key),
         app_id: enrollment.app_id,
         enrollment_id: enrollment.id,
         patient_user_id: req.user.userId,
         diary_session_id: session.id,
-        event_type: eventType,
-        occurred_at: occurredAt,
+        event_type: validated.eventType,
+        occurred_at: validated.occurredAt,
         captured_at: new Date(),
         time_entry_mode: isRetrospective ? 'retrospective' : 'real_time',
-        is_measured: isMeasured,
-        volume_ml: req.body.amountMl,
-        urgency_score: urgencyScore,
-        leakage_amount: req.body.leakageAmount,
+        is_measured: validated.measured,
+        volume_ml: validated.amountMl,
+        urgency_score: validated.urgencyScore,
+        leakage_amount: validated.leakageAmount,
+        fluid_type: validated.fluidType,
         metadata: {
           ...(req.body.payload || req.body.data || {}),
           idempotencyKey: key,
@@ -720,7 +830,11 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
         return noEnrollment(res);
       }
       const result = await client.query(
-        `SELECT e.* FROM clinical_bladder_diary_events e
+        `SELECT e.*,
+                s.state AS session_state,
+                s.starts_at AS session_starts_at,
+                s.ends_at AS session_ends_at
+           FROM clinical_bladder_diary_events e
           JOIN clinical_bladder_diary_sessions s ON s.id = e.diary_session_id
          WHERE e.id = $1 AND s.enrollment_id = $2
          FOR UPDATE`,
@@ -731,22 +845,38 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Event not found', code: 'EVENT_NOT_FOUND' });
       }
-      const payload = req.body.event || req.body.changes || req.body;
-      const nextUrgency = payload.urgencyLevel ?? payload.urgency;
-      if (operation === 'update' && nextUrgency != null && (Number(nextUrgency) < 0 || Number(nextUrgency) > 4)) {
+      if (!EDITABLE_DIARY_STATES.includes(String(oldEvent.session_state || '').toLowerCase())) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Urgency must be between 0 and 4', code: 'VALIDATION_ERROR' });
+        return res.status(409).json({ error: 'Diary session is not editable', code: 'SESSION_CLOSED' });
       }
+      const payload = req.body.event || req.body.changes || req.body;
+      let validated = null;
+      if (operation === 'update') {
+        validated = validateDiaryEventPayload(payload, {
+          starts_at: oldEvent.session_starts_at,
+          ends_at: oldEvent.session_ends_at,
+        }, oldEvent);
+        if (validated.error) {
+          await client.query('ROLLBACK');
+          return res.status(validated.status).json({ error: validated.error, code: validated.code });
+        }
+      }
+      const retrospectiveValue = hasOwn(payload, 'isRetrospective')
+        ? payload.isRetrospective
+        : hasOwn(payload, 'retrospective')
+          ? payload.retrospective
+          : undefined;
       const updated = await updateCompatible(client, 'clinical_bladder_diary_events', oldEvent.id, {
-        event_type: operation === 'update' ? payload.eventType : undefined,
-        occurred_at: operation === 'update' && payload.occurredAt ? new Date(payload.occurredAt) : undefined,
-        volume_ml: operation === 'update' ? payload.amountMl : undefined,
-        is_measured: operation === 'update' ? (payload.measured ?? !Boolean(payload.unableToMeasure)) : undefined,
-        time_entry_mode: operation === 'update' && payload.isRetrospective !== undefined
-          ? (payload.isRetrospective ? 'retrospective' : 'real_time')
+        event_type: operation === 'update' ? validated.eventType : undefined,
+        occurred_at: operation === 'update' ? validated.occurredAt : undefined,
+        volume_ml: operation === 'update' ? validated.amountMl : undefined,
+        is_measured: operation === 'update' ? validated.measured : undefined,
+        time_entry_mode: operation === 'update' && retrospectiveValue !== undefined
+          ? (retrospectiveValue ? 'retrospective' : 'real_time')
           : undefined,
-        urgency_score: operation === 'update' ? nextUrgency : undefined,
-        leakage_amount: operation === 'update' ? payload.leakageAmount : undefined,
+        urgency_score: operation === 'update' ? validated.urgencyScore : undefined,
+        leakage_amount: operation === 'update' ? validated.leakageAmount : undefined,
+        fluid_type: operation === 'update' ? validated.fluidType : undefined,
         metadata: operation === 'update' ? (payload.payload || payload.data) : undefined,
         notes: operation === 'update' ? (payload.notes ?? payload.note) : undefined,
         voided_at: operation === 'void' ? new Date() : operation === 'restore' ? null : undefined,
@@ -805,7 +935,10 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
         await client.query('COMMIT');
         return res.json(formatDiarySession(session));
       }
-      if (Date.now() < new Date(session.ends_at).getTime()) {
+      const testBypass =
+        req.body.testBypass === true &&
+        enrollment.metadata?.clinical_test_mode === true;
+      if (!testBypass && Date.now() < new Date(session.ends_at).getTime()) {
         await client.query('ROLLBACK');
         return res.status(409).json({ error: 'The 72-hour diary window is not complete', code: 'DIARY_WINDOW_ACTIVE' });
       }
@@ -821,10 +954,23 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
       const updated = await updateCompatible(client, 'clinical_bladder_diary_sessions', session.id, {
         state: 'submitted',
         submitted_at: new Date(),
-        submission_metadata: req.body.metadata || {},
+        submission_metadata: {
+          ...(req.body.metadata || {}),
+          testBypass,
+        },
         updated_at: new Date(),
       });
-      await audit(client, enrollment, req.user.userId, 'm2.session.submitted', 'bladder_diary_session', session.id, session, updated);
+      await audit(
+        client,
+        enrollment,
+        req.user.userId,
+        'm2.session.submitted',
+        'bladder_diary_session',
+        session.id,
+        session,
+        updated,
+        { testBypass }
+      );
       await client.query('COMMIT');
       res.json(formatDiarySession(updated));
     } catch (error) {
@@ -1116,5 +1262,10 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
 module.exports = {
   getClinicalBundle,
   registerClinicalApi,
-  _test: { idForKey, isMissingSchemaError },
+  _test: {
+    formatDiaryEvent,
+    idForKey,
+    isMissingSchemaError,
+    validateDiaryEventPayload,
+  },
 };
