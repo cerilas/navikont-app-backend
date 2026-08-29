@@ -118,7 +118,7 @@ async function getActiveEnrollment(client, userId) {
     `SELECT * FROM patient_app_enrollments
      WHERE patient_user_id = $1
        AND app_id = $2
-       AND status IN ('active', 'activated', 'invited')
+       AND status IN ('active', 'activated', 'invited', 'not_eligible')
      ORDER BY activated_at DESC NULLS LAST, created_at DESC
      LIMIT 1`,
     [userId, APP_ID]
@@ -1186,7 +1186,7 @@ app.get('/api/patient/dashboard', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'No active enrollment found' });
     }
 
-    if (enrollment.status === 'paused' || enrollment.status === 'cancelled') {
+    if (enrollment.status === 'paused' || enrollment.status === 'cancelled' || enrollment.status === 'not_eligible') {
       return res.json({
         enrollment: {
           id: enrollment.id,
@@ -2088,6 +2088,39 @@ app.post('/api/patient/questionnaires/:questionnaireVersionId/submit', authentic
               metadata = COALESCE(metadata, '{}'::jsonb) || '{"auto_assigned": true}'::jsonb
           WHERE id = $2
         `, [assignedJourneyId, enrollment.id]);
+      } else {
+        // No rule matched — also check if a questionnaire_followup rule applies
+        const followupRuleRes = await client.query(`
+          SELECT condition, actions
+          FROM core_rules
+          WHERE target_type = 'app' AND target_id = $1 AND rule_type = 'questionnaire_followup' AND is_active = true
+          ORDER BY priority DESC
+        `, [APP_ID]);
+
+        let hasFollowup = false;
+        for (const rule of followupRuleRes.rows) {
+          const cond = rule.condition || {};
+          const scoreMin = cond.scoreMin !== undefined ? cond.scoreMin : -Infinity;
+          const scoreMax = cond.scoreMax !== undefined ? cond.scoreMax : Infinity;
+          if (totalScore >= scoreMin && totalScore <= scoreMax) {
+            hasFollowup = true;
+            break;
+          }
+        }
+
+        if (!hasFollowup) {
+          // No journey and no followup questionnaire — patient doesn't meet any criteria
+          await client.query(`
+            UPDATE patient_app_enrollments
+            SET status = 'not_eligible',
+                updated_at = NOW(),
+                metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb
+            WHERE id = $2
+          `, [
+            JSON.stringify({ not_eligible_reason: 'no_matching_rule', score: totalScore }),
+            enrollment.id,
+          ]);
+        }
       }
     }
 
