@@ -101,7 +101,7 @@ test('registers the complete authenticated patient clinical API', () => {
   }
 });
 
-test('current diary returns SESSION_NOT_FOUND when only closed sessions exist', async () => {
+test('current diary excludes finalized sessions but keeps review-pending sessions eligible', async () => {
   const queries = [];
   const client = {
     async query(sql, params) {
@@ -117,7 +117,10 @@ test('current diary returns SESSION_NOT_FOUND when only closed sessions exist', 
 
   assert.equal(res.statusCode, 404);
   assert.equal(res.body.code, 'SESSION_NOT_FOUND');
-  assert.match(queries[0].sql, /state IN \('draft', 'active', 'in_progress'\)/);
+  assert.match(
+    queries[0].sql,
+    /state IN \('draft', 'active', 'in_progress', 'submitted', 'under_review'\)/
+  );
 });
 
 test('current diary excludes voided events and formats capture metadata', async () => {
@@ -490,6 +493,38 @@ test('recognizes absent migration tables and columns', () => {
   assert.equal(_test.isMissingSchemaError({ code: '42P01' }), true);
   assert.equal(_test.isMissingSchemaError({ code: '42703' }), true);
   assert.equal(_test.isMissingSchemaError({ code: '23505' }), false);
+});
+
+test('loads published plan versions with explicit UUID parameter casts', async () => {
+  const plan = {
+    id: '8f69144b-d3ac-449e-b600-b5b5461b9b6c',
+    status: 'published',
+    published_version_id: '4d5e0ace-5165-4a1a-b925-d1364abdf03e',
+    approved_version_id: null,
+    current_version_id: '4d5e0ace-5165-4a1a-b925-d1364abdf03e',
+  };
+  const version = {
+    id: plan.published_version_id,
+    plan_id: plan.id,
+    version_number: 1,
+    content: { patientGoal: 'Test hedefi' },
+  };
+  const client = {
+    async query(sql) {
+      if (sql.includes('FROM clinical_plans')) return { rows: [plan] };
+      if (sql.includes('FROM clinical_plan_versions')) {
+        assert.match(sql, /\$2::uuid/);
+        assert.match(sql, /\$3::uuid/);
+        assert.match(sql, /\$4::uuid/);
+        return { rows: [version] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+
+  const result = await _test.loadActivePlan(client, 'enrollment-id');
+
+  assert.equal(result.currentVersion.id, version.id);
 });
 
 test('returns a legacy-safe state before the migration exists', async () => {

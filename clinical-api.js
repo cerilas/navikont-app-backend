@@ -334,8 +334,8 @@ async function loadActivePlan(client, enrollmentId) {
   const versions = await safeRows(
     client,
     `SELECT * FROM clinical_plan_versions
-      WHERE id = COALESCE($2, $3, $4)
-         OR (plan_id = $1 AND COALESCE($2, $3, $4) IS NULL)
+      WHERE id = COALESCE($2::uuid, $3::uuid, $4::uuid)
+         OR (plan_id = $1 AND COALESCE($2::uuid, $3::uuid, $4::uuid) IS NULL)
       ORDER BY version_number DESC, created_at DESC
       LIMIT 1`,
     [plan.id, plan.published_version_id, plan.approved_version_id, plan.current_version_id]
@@ -658,7 +658,7 @@ function registerClinicalApi({ app, pool, authenticate, getEnrollment }) {
         client,
         `SELECT * FROM clinical_bladder_diary_sessions
           WHERE enrollment_id = $1
-            AND state IN ('draft', 'active', 'in_progress')
+            AND state IN ('draft', 'active', 'in_progress', 'submitted', 'under_review')
           ORDER BY created_at DESC LIMIT 1`,
         [enrollment.id]
       );
@@ -1266,6 +1266,7 @@ module.exports = {
     formatDiaryEvent,
     idForKey,
     isMissingSchemaError,
+    loadActivePlan,
     validateDiaryEventPayload,
   },
 };
